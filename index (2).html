@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>セミナー参加予定名簿</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; overflow-x: hidden; }
+    body { background: #F7F8FA; font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif; }
+    #app { width: 100%; margin: 0; min-height: 100vh; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 4px solid #fff3; border-top: 4px solid #2563EB;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+      margin: 0 auto 16px;
+    }
+    .toast {
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+      color: #fff; padding: 10px 20px; border-radius: 24px;
+      font-size: 13px; font-weight: 700; z-index: 9999;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2); white-space: nowrap;
+      transition: opacity 0.3s;
+    }
+    .busy-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.25);
+      z-index: 9998; display: flex; align-items: center; justify-content: center;
+    }
+    .busy-spinner {
+      width: 40px; height: 40px;
+      border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid #fff;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    button { font-family: inherit; }
+    input, select { font-family: inherit; }
+    select { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236B7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// ══════════════════════════════════════════════
+// 設定
+// ══════════════════════════════════════════════
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzIpjvXmQGQVHBtF58WkpZzU2G2g00znSe34Jf5E7618UJyJ4pKAS0eRxku_wfbUIAs/exec";
+const MASTER_PASSCODE = "SEMINAR_MASTER_2026";
+const RANKS = ["GM","PM","ECM","DCM","PDCM"];
+const SEM_TYPES = ["オープンBE","オープンBS","オープンBT","PBS","BE","BS","BT","クローズBT","クローズBM"];
+const SEM_COLORS = {
+  "オープンBE": { accent:"#2563EB", bg:"#EFF4FF", text:"#1D4ED8" },
+  "オープンBS": { accent:"#7C3AED", bg:"#F5F3FF", text:"#6D28D9" },
+  "オープンBT": { accent:"#059669", bg:"#ECFDF5", text:"#047857" },
+  "PBS":        { accent:"#DC2626", bg:"#FEF2F2", text:"#B91C1C" },
+  "BE":         { accent:"#0891B2", bg:"#ECFEFF", text:"#0E7490" },
+  "BS":         { accent:"#9333EA", bg:"#FDF4FF", text:"#7E22CE" },
+  "BT":         { accent:"#D97706", bg:"#FFFBEB", text:"#B45309" },
+  "クローズBT":  { accent:"#DB2777", bg:"#FDF2F8", text:"#BE185D" },
+  "クローズBM":  { accent:"#65A30D", bg:"#F7FEE7", text:"#4D7C0F" },
+};
+const VENUE_TYPES = [
+  { value:"real",   label:"📕 リアル" },
+  { value:"online", label:"💻 オンライン" },
+  { value:"both",   label:"📕💻 両方" },
+];
+const REGIONS = ["関西","関東","中部","その他","オンライン"];
+const REGION_COLORS = { "関西":"#2563EB","関東":"#DC2626","中部":"#059669","その他":"#D97706","オンライン":"#7C3AED" };
+
+// ══════════════════════════════════════════════
+// GAS通信
+// ══════════════════════════════════════════════
+async function gasGet(params) {
+  const url = GAS_URL + "?" + new URLSearchParams(params);
+  const res = await fetch(url);
+  return res.json();
+}
+async function gasPost(body) {
+  const res = await fetch(GAS_URL, { method:"POST", body: JSON.stringify(body) });
+  return res.json();
+}
+
+// ══════════════════════════════════════════════
+// ユーティリティ
+// ══════════════════════════════════════════════
+function leaderLabel(l) { return l.name + l.rank; }
+
+function formatDate(dateStr) {
+  const d = new Date(dateStr);
+  const w = ["日","月","火","水","木","金","土"][d.getDay()];
+  return `${d.getMonth()+1}月${d.getDate()}日（${w}）`;
+}
+
+function isArchived(dateStr) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + 1);
+  d.setHours(23,59,59);
+  return new Date() > d;
+}
+
+function buildSeminars(seminars, participants) {
+  return seminars
+    .map(s => ({ ...s, participants: participants.filter(p => Number(p.seminarId) === Number(s.id)) }))
+    .sort((a,b) => a.date.localeCompare(b.date) || a.timeStart.localeCompare(b.timeStart));
+}
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  if (attrs) Object.entries(attrs).forEach(([k,v]) => {
+    if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2).toLowerCase(), v);
+    else el.setAttribute(k, v);
+  });
+  children.flat(Infinity).forEach(c => {
+    if (c == null) return;
+    el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  });
+  return el;
+}
+
+// ══════════════════════════════════════════════
+// アプリ状態
+// ══════════════════════════════════════════════
+const state = {
+  loading: true, error: null,
+  seminars: [], participants: [], leaders: [], passcode: "",
+  tab: "list", adminAuth: false, adminInput: "", adminError: "",
+  filterRegion: "全て",
+  expandedIds: new Set(), openFormId: null,
+  showArchived: false, busy: false, toast: null,
+  adminSection: "seminar",
+};
+
+let toastTimer = null;
+
+function showToast(msg, type="success") {
+  state.toast = { msg, type };
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { state.toast = null; render(); }, 2800);
+  render();
+}
+
+function setState(updates) {
+  Object.assign(state, updates);
+  render();
+}
+
+// ══════════════════════════════════════════════
+// API操作
+// ══════════════════════════════════════════════
+async function fetchAll() {
+  setState({ loading:true, error:null });
+  try {
+    const res = await gasGet({ action:"getAll" });
+    if (!res.ok) throw new Error(res.error);
+    setState({
+      seminars: res.seminars||[],
+      participants: res.participants||[],
+      leaders: res.leaders||[],
+      passcode: res.passcode||"",
+      loading: false,
+    });
+  } catch(e) {
+    setState({ loading:false, error:"データの読み込みに失敗しました。再読み込みしてください。" });
+  }
+}
+
+async function addParticipant(semId, name, leaderId, maru, nijimaru, ticket, star) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"addParticipant", participant:{ seminarId:semId, name, leaderId, maru, nijimaru, ticket, star } });
+    if (!res.ok) throw new Error(res.error);
+    showToast(`${name} さんを追記しました`);
+    await fetchAll();
+  } catch { showToast("追記に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function removeParticipant(pid) {
+  if (!confirm("削除しますか？")) return;
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"removeParticipant", id:pid });
+    if (!res.ok) throw new Error(res.error);
+    showToast("削除しました","info");
+    await fetchAll();
+  } catch { showToast("削除に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function updateParticipant(pid, changes) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"updateParticipant", id:pid, changes });
+    if (!res.ok) throw new Error(res.error);
+    showToast("更新しました");
+    await fetchAll();
+  } catch { showToast("更新に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function addSeminar(form) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"addSeminar", seminar:form, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.seminars.push({ ...form, id:res.id });
+    showToast("セミナーを追加しました");
+  } catch { showToast("追加に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function removeSeminar(semId) {
+  if (!confirm("セミナーを削除しますか？参加者データも全て消えます。")) return;
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"removeSeminar", id:semId, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.seminars = state.seminars.filter(s => s.id !== semId);
+    state.participants = state.participants.filter(p => p.seminarId !== semId);
+    showToast("削除しました","info");
+  } catch { showToast("削除に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function addLeader(name, rank) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"addLeader", leader:{name,rank}, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.leaders.push({ id:res.id, name, rank });
+    showToast(`${name}${rank} を追加しました`);
+  } catch { showToast("追加に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function updateLeader(id, name, rank) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"updateLeader", leader:{id,name,rank}, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.leaders = state.leaders.map(l => l.id===id ? {...l,name,rank} : l);
+    showToast("更新しました");
+  } catch { showToast("更新に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function removeLeader(id) {
+  if (!confirm("削除しますか？")) return;
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"removeLeader", id, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.leaders = state.leaders.filter(l => l.id !== id);
+    showToast("削除しました","info");
+  } catch { showToast("削除に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+async function changePasscode(newCode) {
+  setState({ busy:true });
+  try {
+    const res = await gasPost({ action:"changePasscode", newPasscode:newCode, passcode:state.passcode });
+    if (!res.ok) throw new Error(res.error);
+    state.passcode = newCode;
+    showToast("パスコードを変更しました");
+  } catch { showToast("変更に失敗しました","error"); }
+  setState({ busy:false });
+}
+
+// ══════════════════════════════════════════════
+// UIコンポーネント
+// ══════════════════════════════════════════════
+function Tag(text, color, bg) {
+  return h("span", { style:{
+    display:"inline-block", background:bg, color:color,
+    border:`1px solid ${color}44`, borderRadius:10,
+    padding:"2px 8px", fontSize:11, fontWeight:700,
+  }}, text);
+}
+
+function ToggleBtn(label, active, color, onClick) {
+  return h("button", {
+    onclick: onClick,
+    style:{
+      padding:"6px 10px", borderRadius:10, fontSize:12, fontWeight:700,
+      border:`1.5px solid ${active ? color : "#D1D5DB"}`,
+      background: active ? color : "#F9FAFB",
+      color: active ? "#fff" : "#6B7280",
+      cursor:"pointer",
+    }
+  }, label);
+}
+
+function renderParticipantRow(p, onRemove, onUpdate) {
+  let editing = false;
+  let maru = p.maru, nijimaru = p.nijimaru, ticket = p.ticket, star = p.star||false;
+
+  const row = h("div", { style:{ background:"#fff", borderRadius:8, border:"1px solid #E2E6EE", padding:"7px 10px", marginBottom:4 }});
+
+  function renderNormal() {
+    row.innerHTML = "";
+    const left = h("span", { style:{ fontSize:13, fontWeight:700, color:"#1A2744" }}, p.name);
+    const right = h("div", { style:{ display:"flex", gap:4, alignItems:"center", flexWrap:"wrap", justifyContent:"flex-end" }});
+    if (p.nijimaru) right.appendChild(Tag("◎","#0D9488","#F0FDFA"));
+    if (p.maru)     right.appendChild(Tag("〇","#2563EB","#EFF4FF"));
+    if (p.ticket)   right.appendChild(Tag("※","#DC2626","#FEF2F2"));
+        if (p.star)     right.appendChild(Tag("⭐︎","#D97706","#FFFBEB"));
+    const editBtn = h("button", { style:{ background:"#EFF4FF", color:"#2563EB", border:"1px solid #BFDBFE", borderRadius:7, padding:"3px 8px", fontSize:11, cursor:"pointer", fontWeight:600 }}, "編集");
+    editBtn.onclick = () => { editing=true; renderEditing(); };
+    const delBtn = h("button", { style:{ background:"#FEF2F2", color:"#DC2626", border:"1px solid #FECACA", borderRadius:7, padding:"3px 8px", fontSize:11, cursor:"pointer", fontWeight:600 }}, "削除");
+    delBtn.onclick = onRemove;
+    right.appendChild(editBtn);
+    right.appendChild(delBtn);
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.alignItems = "center";
+    row.appendChild(left);
+    row.appendChild(right);
+  }
+
+  function renderEditing() {
+    row.innerHTML = "";
+    row.style.display = "block";
+    row.style.background = "#F0FDF4";
+    row.style.borderColor = "#6EE7B7";
+
+    const titleRow = h("div", { style:{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }},
+      h("span", { style:{ fontSize:11, color:"#059669", fontWeight:700 }}, "✏️ 編集中"),
+      h("span", { style:{ fontSize:13, fontWeight:700 }}, p.name)
+    );
+
+    let maruBtn, nijiBtn, ticketBtn;
+
+    function refreshToggles() {
+      maruBtn.style.background   = maru     ? "#2563EB" : "#F9FAFB";
+      maruBtn.style.color        = maru     ? "#fff"    : "#6B7280";
+      maruBtn.style.borderColor  = maru     ? "#2563EB" : "#D1D5DB";
+      nijiBtn.style.background   = nijimaru ? "#0D9488" : "#F9FAFB";
+      nijiBtn.style.color        = nijimaru ? "#fff"    : "#6B7280";
+      nijiBtn.style.borderColor  = nijimaru ? "#0D9488" : "#D1D5DB";
+      ticketBtn.style.background = ticket   ? "#DC2626" : "#F9FAFB";
+      ticketBtn.style.color      = ticket   ? "#fff"    : "#6B7280";
+      ticketBtn.style.borderColor= ticket   ? "#DC2626" : "#D1D5DB";
+      starBtn.style.background   = star     ? "#D97706" : "#F9FAFB";
+      starBtn.style.color        = star     ? "#fff"    : "#6B7280";
+      starBtn.style.borderColor  = star     ? "#D97706" : "#D1D5DB";
+    }
+
+    const togStyle = { padding:"6px 10px", borderRadius:10, fontSize:12, fontWeight:700, border:"1.5px solid #D1D5DB", background:"#F9FAFB", color:"#6B7280", cursor:"pointer" };
+    nijiBtn   = h("button", { style:{...togStyle} }, "◎ 未登録新規");
+    maruBtn   = h("button", { style:{...togStyle} }, "〇 登録済初参加");
+    ticketBtn = h("button", { style:{...togStyle} }, "※ チケット有");
+    starBtn   = h("button", { style:{...togStyle} }, "⭐︎ 主催席確保");
+    nijiBtn.onclick   = () => { nijimaru=!nijimaru; refreshToggles(); };
+    maruBtn.onclick   = () => { maru=!maru;         refreshToggles(); };
+    ticketBtn.onclick = () => { ticket=!ticket;     refreshToggles(); };
+    starBtn.onclick   = () => { star=!star;         refreshToggles(); };
+    refreshToggles();
+
+    const toggleRow = h("div", { style:{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:8 }}, nijiBtn, maruBtn, ticketBtn, starBtn);
+
+    const saveBtn = h("button", { style:{ flex:1, padding:"8px 0", borderRadius:9, fontSize:13, fontWeight:700, background:"#059669", color:"#fff", border:"none", cursor:"pointer" }}, "保存");
+    saveBtn.onclick = () => {
+      p.maru=maru; p.nijimaru=nijimaru; p.ticket=ticket; p.star=star;
+      onUpdate({ maru, nijimaru, ticket, star });
+      editing=false;
+      row.style.background="#fff"; row.style.borderColor="#E2E6EE";
+      renderNormal();
+    };
+    const cancelBtn = h("button", { style:{ flex:1, padding:"8px 0", borderRadius:9, fontSize:13, fontWeight:700, background:"#F1F3F7", color:"#6B7280", border:"1px solid #D1D5DB", cursor:"pointer" }}, "キャンセル");
+    cancelBtn.onclick = () => {
+      maru=p.maru; nijimaru=p.nijimaru; ticket=p.ticket;
+      editing=false;
+      row.style.background="#fff"; row.style.borderColor="#E2E6EE";
+      renderNormal();
+    };
+    const btnRow = h("div", { style:{ display:"flex", gap:8 }}, saveBtn, cancelBtn);
+
+    row.appendChild(titleRow);
+    row.appendChild(toggleRow);
+    row.appendChild(btnRow);
+  }
+
+  renderNormal();
+  return row;
+}
+
+function renderAddForm(semId, leaders, accent, onClose) {
+  let name="", leaderId=leaders[0]?.id||"", maru=false, nijimaru=false, ticket=false;
+
+  const form = h("div", { style:{ marginTop:8, border:`2px solid ${accent}`, borderRadius:12, overflow:"hidden" }});
+  const header = h("div", { style:{ background:accent, color:"#fff", fontWeight:700, fontSize:13, padding:"8px 14px", textAlign:"center" }}, "＋ 参加を追記する");
+
+  const body = h("div", { style:{ padding:"12px 14px", display:"flex", flexDirection:"column", gap:8 }});
+
+  const leaderSel = h("select", { style:{ width:"100%", padding:"10px 12px", borderRadius:10, border:"1.5px solid #D1D5DB", fontSize:13, background:"#F9FAFB", boxSizing:"border-box" }},
+    ...leaders.map(l => {
+      const opt = document.createElement("option");
+      opt.value = l.id; opt.textContent = leaderLabel(l);
+      return opt;
+    })
+  );
+  leaderSel.onchange = e => { leaderId = e.target.value; };
+
+  const nameInput = h("input", { placeholder:"名前を入力してください", style:{ width:"100%", padding:"10px 12px", borderRadius:10, border:`1.5px solid ${accent}`, fontSize:13, background:"#F9FAFB", boxSizing:"border-box", outline:"none" }});
+  nameInput.oninput = e => { name = e.target.value; errEl.textContent=""; };
+
+  const errEl = h("div", { style:{ fontSize:12, color:"#DC2626", fontWeight:700, minHeight:16 }});
+
+  let nijiBtn, maruBtn, ticketBtn, starBtn;
+  const togStyle = { padding:"6px 10px", borderRadius:10, fontSize:12, fontWeight:700, border:"1.5px solid #D1D5DB", background:"#F9FAFB", color:"#6B7280", cursor:"pointer" };
+
+  function refreshToggles() {
+    maruBtn.style.background    = maru     ? "#2563EB" : "#F9FAFB";
+    maruBtn.style.color         = maru     ? "#fff"    : "#6B7280";
+    maruBtn.style.borderColor   = maru     ? "#2563EB" : "#D1D5DB";
+    nijiBtn.style.background    = nijimaru ? "#0D9488" : "#F9FAFB";
+    nijiBtn.style.color         = nijimaru ? "#fff"    : "#6B7280";
+    nijiBtn.style.borderColor   = nijimaru ? "#0D9488" : "#D1D5DB";
+    ticketBtn.style.background  = ticket   ? "#DC2626" : "#F9FAFB";
+    ticketBtn.style.color       = ticket   ? "#fff"    : "#6B7280";
+    ticketBtn.style.borderColor = ticket   ? "#DC2626" : "#D1D5DB";
+    starBtn.style.background    = star     ? "#D97706" : "#F9FAFB";
+    starBtn.style.color         = star     ? "#fff"    : "#6B7280";
+    starBtn.style.borderColor   = star     ? "#D97706" : "#D1D5DB";
+  }
+
+  nijiBtn   = h("button",{style:{...togStyle}},"◎ 未登録新規");
+  maruBtn   = h("button",{style:{...togStyle}},"〇 登録済初参加");
+  ticketBtn = h("button",{style:{...togStyle}},"※ チケット有");
+  starBtn   = h("button",{style:{...togStyle}},"⭐︎ 主催席確保");
+  nijiBtn.onclick   = () => { nijimaru=!nijimaru; refreshToggles(); };
+  maruBtn.onclick   = () => { maru=!maru;         refreshToggles(); };
+  ticketBtn.onclick = () => { ticket=!ticket;     refreshToggles(); };
+  starBtn.onclick   = () => { star=!star;         refreshToggles(); };
+
+  const submitBtn = h("button", { style:{ width:"100%", background:accent, color:"#fff", border:"none", borderRadius:10, padding:"12px 0", fontSize:14, fontWeight:700, cursor:"pointer" }}, "参加を追記する");
+  submitBtn.onclick = () => {
+    if (!name.trim()) { errEl.textContent="名前を入力してください"; return; }
+    addParticipant(semId, name.trim(), Number(leaderId), maru, nijimaru, ticket);
+    onClose();
+  };
+
+  body.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"班リーダー"));
+  body.appendChild(leaderSel);
+  body.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"お名前"));
+  body.appendChild(nameInput);
+  body.appendChild(errEl);
+  body.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"記号（複数選択可）"));
+  body.appendChild(h("div",{style:{display:"flex",flexWrap:"wrap",gap:6}},nijiBtn,maruBtn,ticketBtn,starBtn));
+  body.appendChild(submitBtn);
+
+  form.appendChild(header);
+  form.appendChild(body);
+  return form;
+}
+
+function renderSeminarCard(sem, leaders) {
+  const c = SEM_COLORS[sem.semType] || { accent:"#64748B", bg:"#F8FAFC", text:"#475569" };
+  const regionColor = REGION_COLORS[sem.region] || "#64748B";
+  const venueLabel = VENUE_TYPES.find(v=>v.value===sem.venueType)?.label||"";
+  const archived = isArchived(sem.date);
+
+  const byLeader = {};
+  sem.participants.forEach(p => {
+    if (!byLeader[p.leaderId]) byLeader[p.leaderId]=[];
+    byLeader[p.leaderId].push(p);
+  });
+
+  const card = h("div",{style:{
+    borderRadius:14, border:`2px solid ${c.accent}`,
+    marginBottom:14, overflow:"hidden",
+    display:"flex", flexDirection:"row",
+    boxShadow:"0 2px 8px rgba(0,0,0,0.06)",
+    background: c.bg, opacity: archived?0.75:1,
+  }});
+
+  const accentBar = h("div",{style:{ width:10, flexShrink:0, background:c.accent }});
+
+  const inner = h("div",{style:{ flex:1, padding:"12px 12px 10px" }});
+
+  // header
+  const regionBadge = h("span",{style:{ color:"#fff", fontSize:10, fontWeight:700, borderRadius:8, padding:"2px 8px", background:regionColor }}, sem.region);
+  const venueSpan = h("span",{style:{ fontSize:10, color:c.text, marginLeft:4 }}, venueLabel);
+  const badgeWrap = h("div",{style:{display:"flex",alignItems:"center"}}, regionBadge, venueSpan);
+  const cardHeader = h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}},
+    h("span",{style:{fontSize:12,color:"#6B7280",fontWeight:600}}, formatDate(sem.date)),
+    badgeWrap
+  );
+
+  const semTypeEl = h("div",{style:{fontSize:20,fontWeight:900,margin:"2px 0 6px",color:c.text}}, `✦ ${sem.semType}`);
+  const timeBadge = h("div",{style:{display:"inline-block",background:"#fff",border:`1px solid ${c.accent}`,borderRadius:8,padding:"3px 10px",fontSize:12,fontWeight:700,marginBottom:8}}, `🕐 ${sem.timeStart} – ${sem.timeEnd}`);
+  const metaEl = h("div",{style:{display:"flex",flexDirection:"column",gap:2,marginBottom:8}},
+    h("span",{style:{fontSize:13,fontWeight:700,color:"#1A2744"}}, `講師：${sem.instructor}`),
+    h("span",{style:{fontSize:11,color:"#6B7280"}}, `主催：${sem.organizer}`),
+    h("span",{style:{fontSize:11,color:"#6B7280"}}, `📍 ${sem.venue}`)
+  );
+  const divider = h("div",{style:{borderTop:`1px solid ${c.accent}55`,margin:"8px 0"}});
+
+  // expand button
+  let expanded = state.expandedIds.has(sem.id);
+  let formOpen = state.openFormId === sem.id;
+
+  const expandBtn = h("button",{style:{background:"none",border:"none",fontSize:13,fontWeight:700,cursor:"pointer",padding:0,color:c.text,display:"flex",alignItems:"center"}});
+
+  const participantArea = h("div",{style:{marginTop:8}});
+  const formArea = h("div");
+
+  function renderParticipants() {
+    participantArea.innerHTML="";
+    expandBtn.textContent = `📋 参加者 ${sem.participants.length}名 ${expanded?"▲":"▼"}`;
+    if (!expanded) return;
+
+    if (Object.keys(byLeader).length===0) {
+      participantArea.appendChild(h("div",{style:{fontSize:12,color:"#9CA3AF",textAlign:"center",padding:"8px 0"}},"まだ参加者がいません"));
+    }
+
+    Object.entries(byLeader).forEach(([lid,members]) => {
+      const leader = leaders.find(l=>l.id===Number(lid));
+      const grpHeader = h("div",{style:{
+        borderLeft:"4px solid #059669", paddingLeft:8, fontSize:11,
+        color:"#6B7280", fontWeight:700, background:"rgba(255,255,255,0.6)",
+        borderRadius:"0 4px 4px 0", padding:"3px 8px", marginBottom:4,
+      }}, (leader?leaderLabel(leader):"不明") + " グループ");
+      participantArea.appendChild(grpHeader);
+      members.forEach(p => {
+        const row = renderParticipantRow(p,
+          () => removeParticipant(p.id),
+          (changes) => updateParticipant(p.id, changes)
+        );
+        participantArea.appendChild(row);
+      });
+    });
+
+    if (!archived) {
+      const addBtn = h("button",{style:{
+        width:"100%", background:"#fff", border:`1.5px solid ${c.accent}`,
+        borderRadius:10, padding:"9px 0", fontSize:13, fontWeight:700,
+        cursor:"pointer", marginTop:6, color:c.accent,
+      }}, formOpen ? "▲ フォームを閉じる" : "＋ 参加を追記する");
+      addBtn.onclick = () => {
+        formOpen = !formOpen;
+        state.openFormId = formOpen ? sem.id : null;
+        addBtn.textContent = formOpen ? "▲ フォームを閉じる" : "＋ 参加を追記する";
+        renderForm();
+      };
+      participantArea.appendChild(addBtn);
+    }
+  }
+
+  function renderForm() {
+    formArea.innerHTML="";
+    if (expanded && formOpen && !archived) {
+      formArea.appendChild(renderAddForm(sem.id, leaders, c.accent, () => {
+        formOpen=false; state.openFormId=null;
+        renderParticipants(); renderForm();
+      }));
+    }
+  }
+
+  expandBtn.onclick = () => {
+    expanded = !expanded;
+    if (expanded) state.expandedIds.add(sem.id);
+    else { state.expandedIds.delete(sem.id); formOpen=false; }
+    renderParticipants(); renderForm();
+  };
+
+  renderParticipants();
+
+  inner.appendChild(cardHeader);
+  inner.appendChild(semTypeEl);
+  inner.appendChild(timeBadge);
+  inner.appendChild(metaEl);
+  inner.appendChild(divider);
+  inner.appendChild(expandBtn);
+  inner.appendChild(participantArea);
+  inner.appendChild(formArea);
+
+  card.appendChild(accentBar);
+  card.appendChild(inner);
+  return card;
+}
+
+// ══════════════════════════════════════════════
+// メイン描画
+// ══════════════════════════════════════════════
+function render() {
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+
+  // トースト
+  if (state.toast) {
+    const bg = state.toast.type==="error" ? "#DC2626" : state.toast.type==="info" ? "#374151" : "#059669";
+    app.appendChild(h("div",{class:"toast",style:{background:bg}}, state.toast.msg));
+  }
+
+  // Busyオーバーレイ
+  if (state.busy) {
+    app.appendChild(h("div",{class:"busy-overlay"},h("div",{class:"busy-spinner"})));
+  }
+
+  // ローディング
+  if (state.loading) {
+    app.appendChild(h("div",{style:{background:"#1A2744",padding:"10px 16px 16px",textAlign:"center"}},
+      h("div",{style:{color:"#fff",fontSize:18,fontWeight:700}},"セミナー参加予定名簿")
+    ));
+    app.appendChild(h("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"80px 24px"}},
+      h("div",{class:"spinner"}),
+      h("div",{style:{color:"#6B7280",fontSize:13}},"データを読み込み中…")
+    ));
+    return;
+  }
+
+  // エラー
+  if (state.error) {
+    app.appendChild(h("div",{style:{background:"#1A2744",padding:"10px 16px 16px",textAlign:"center"}},
+      h("div",{style:{color:"#fff",fontSize:18,fontWeight:700}},"セミナー参加予定名簿")
+    ));
+    const retryBtn = h("button",{style:{background:"#2563EB",color:"#fff",border:"none",borderRadius:10,padding:"10px 24px",fontSize:14,fontWeight:700,cursor:"pointer",marginTop:12}}, "再読み込み");
+    retryBtn.onclick = fetchAll;
+    app.appendChild(h("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:"60px 24px",gap:12}},
+      h("div",{style:{fontSize:36}},"⚠️"),
+      h("div",{style:{color:"#DC2626",fontSize:13,textAlign:"center"}}, state.error),
+      retryBtn
+    ));
+    return;
+  }
+
+  // ステータスバー
+  const reloadBtn = h("button",{style:{background:"none",border:"1px solid #93C5FD",color:"#93C5FD",borderRadius:8,padding:"4px 10px",fontSize:11,cursor:"pointer"}}, "🔄 更新");
+  reloadBtn.onclick = fetchAll;
+  app.appendChild(h("div",{style:{background:"#1A2744",padding:"10px 16px 8px",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+    h("span",{style:{color:"#fff",fontWeight:700,fontSize:14}},"セミナー名簿"),
+    reloadBtn
+  ));
+
+  // ヘッダー
+  app.appendChild(h("div",{style:{background:"#1A2744",padding:"8px 16px 16px",textAlign:"center"}},
+    h("div",{style:{color:"#fff",fontSize:18,fontWeight:700}},"セミナー参加予定名簿"),
+    h("div",{style:{color:"#93C5FD",fontSize:11,marginTop:4}},"参加したいセミナーに名前を追記できます")
+  ));
+
+  // タブバー
+  const tabBar = h("div",{style:{display:"flex",background:"#fff",borderBottom:"1px solid #E2E6EE"}});
+  [["list","📅 セミナー一覧"],["admin","🔒 管理者"]].forEach(([key,label]) => {
+    const btn = h("button",{style:{
+      flex:1, padding:"12px 0", background:"none", border:"none",
+      fontSize:13, cursor:"pointer", fontWeight:600,
+      color: state.tab===key ? "#2563EB" : "#9CA3AF",
+      borderBottom: state.tab===key ? "2px solid #2563EB" : "2px solid transparent",
+    }}, label);
+    btn.onclick = () => { state.tab=key; render(); };
+    tabBar.appendChild(btn);
+  });
+  app.appendChild(tabBar);
+
+  const content = h("div",{style:{padding:"12px 12px 24px"}});
+
+  // ── 一覧タブ
+  if (state.tab==="list") {
+    // 凡例
+    content.appendChild(h("div",{style:{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:10,padding:"8px 12px",display:"flex",alignItems:"center",flexWrap:"wrap",gap:6,marginBottom:8}},
+      h("span",{style:{fontSize:11,fontWeight:700,color:"#D97706",marginRight:4}},"凡例"),
+      Tag("◎ 未登録新規","#0D9488","#F0FDFA"),
+      Tag("〇 登録済初参加","#2563EB","#EFF4FF"),
+      Tag("※ チケット有","#DC2626","#FEF2F2"),
+      Tag("⭐︎ 主催席確保","#D97706","#FFFBEB")
+    ));
+
+    // 種別カラー凡例
+    const semBadges = SEM_TYPES.map(t => h("span",{style:{color:"#fff",fontSize:10,fontWeight:700,borderRadius:8,padding:"2px 8px",background:SEM_COLORS[t].accent}},t));
+    content.appendChild(h("div",{style:{background:"#F1F3F7",borderRadius:10,padding:"8px 12px",marginBottom:8}},
+      h("div",{style:{fontSize:11,color:"#6B7280",fontWeight:700,marginBottom:6}},"セミナー種別"),
+      h("div",{style:{display:"flex",flexWrap:"wrap",gap:5}},...semBadges)
+    ));
+
+    // 地域フィルター
+    const filterBar = h("div",{style:{display:"flex",alignItems:"center",flexWrap:"wrap",gap:5,background:"#fff",borderRadius:10,padding:"8px 12px",marginBottom:10}},
+      h("span",{style:{fontSize:11,color:"#6B7280"}},"絞り込み：")
+    );
+    ["全て",...REGIONS].forEach(r => {
+      const btn = h("button",{style:{
+        border:"none", borderRadius:12, padding:"5px 10px", fontSize:11, cursor:"pointer", fontWeight:600,
+        background: state.filterRegion===r ? "#2563EB" : "#F1F3F7",
+        color: state.filterRegion===r ? "#fff" : "#6B7280",
+      }}, r);
+      btn.onclick = () => { state.filterRegion=r; render(); };
+      filterBar.appendChild(btn);
+    });
+    content.appendChild(filterBar);
+
+    // セミナーカード
+    const allSems = buildSeminars(state.seminars, state.participants);
+    const activeSems = allSems.filter(s=>!isArchived(s.date));
+    const archivedSems = allSems.filter(s=>isArchived(s.date));
+    const visibleSems = activeSems.filter(s=>state.filterRegion==="全て"||s.region===state.filterRegion);
+
+    if (visibleSems.length===0) {
+      content.appendChild(h("div",{style:{textAlign:"center",color:"#9CA3AF",padding:"32px 0",fontSize:13}},"表示できるセミナーがありません"));
+    }
+    visibleSems.forEach(sem => content.appendChild(renderSeminarCard(sem, state.leaders)));
+
+    // 過去分
+    if (archivedSems.length>0) {
+      const archBtn = h("button",{style:{width:"100%",background:"#F1F3F7",border:"1px solid #E2E6EE",borderRadius:10,padding:"10px",fontSize:12,color:"#6B7280",cursor:"pointer",fontWeight:700,marginBottom:8}},
+        state.showArchived ? "▲ 過去のセミナーを閉じる" : `▼ 過去のセミナー（${archivedSems.length}件）`
+      );
+      archBtn.onclick = () => { state.showArchived=!state.showArchived; render(); };
+      content.appendChild(archBtn);
+      if (state.showArchived) {
+        archivedSems.forEach(sem => content.appendChild(renderSeminarCard(sem, state.leaders)));
+      }
+    }
+  }
+
+  // ── 管理者タブ
+  if (state.tab==="admin") {
+    if (!state.adminAuth) {
+      renderAdminLogin(content);
+    } else {
+      renderAdminPanel(content);
+    }
+  }
+
+  app.appendChild(content);
+}
+
+// ── 管理者ログイン
+function renderAdminLogin(container) {
+  const inputEl = h("input",{type:"password",placeholder:"パスコードを入力",style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box",outline:"none"}});
+  const errEl = h("div",{style:{fontSize:12,color:"#DC2626",fontWeight:700,minHeight:18}});
+  const loginBtn = h("button",{style:{width:"100%",background:"#1A2744",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:"pointer"}}, "ログイン");
+  loginBtn.onclick = () => {
+    const val = inputEl.value;
+    if (val===state.passcode || val===MASTER_PASSCODE) {
+      state.adminAuth=true; state.adminError=""; render();
+    } else {
+      errEl.textContent="パスコードが違います";
+    }
+  };
+  inputEl.onkeydown = e => { if(e.key==="Enter") loginBtn.click(); };
+
+  container.appendChild(h("div",{style:{display:"flex",flexDirection:"column",gap:12,padding:"32px 16px"}},
+    h("div",{style:{textAlign:"center",fontSize:40}},"🔒"),
+    h("div",{style:{textAlign:"center",fontSize:18,fontWeight:700,color:"#1A2744"}},"管理者ログイン"),
+    inputEl, errEl, loginBtn
+  ));
+}
+
+// ── 管理者パネル
+function renderAdminPanel(container) {
+  const logoutBtn = h("button",{style:{background:"#FEF2F2",color:"#DC2626",border:"1px solid #FECACA",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer",fontWeight:600}}, "ログアウト");
+  logoutBtn.onclick = () => { state.adminAuth=false; render(); };
+
+  container.appendChild(h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 4px 12px"}},
+    h("span",{style:{fontWeight:700,color:"#1A2744"}},"管理者メニュー"),
+    logoutBtn
+  ));
+
+  // サブタブ
+  const subTabs = h("div",{style:{display:"flex",gap:6,marginBottom:14}});
+  [["seminar","📅 セミナー"],["leader","👥 リーダー"],["passcode","🔑 パスコード"]].forEach(([k,l]) => {
+    const btn = h("button",{style:{
+      flex:1, padding:"8px 0", border:"none", borderRadius:8, fontSize:12, cursor:"pointer", fontWeight:600,
+      background: state.adminSection===k ? "#1A2744" : "#F1F3F7",
+      color: state.adminSection===k ? "#fff" : "#6B7280",
+    }}, l);
+    btn.onclick = () => { state.adminSection=k; render(); };
+    subTabs.appendChild(btn);
+  });
+  container.appendChild(subTabs);
+
+  if (state.adminSection==="seminar") renderAdminSeminar(container);
+  if (state.adminSection==="leader") renderAdminLeader(container);
+  if (state.adminSection==="passcode") renderAdminPasscode(container);
+}
+
+// ── セミナー管理
+function renderAdminSeminar(container) {
+  let showForm=false;
+  let form={ date:"",semType:"オープンBE",timeStart:"",timeEnd:"",instructor:"",organizer:"",venue:"",venueType:"real",region:"関西" };
+
+  const wrap = h("div",{style:{padding:"0 4px"}});
+
+  const toggleFormBtn = h("button",{style:{width:"100%",background:"#2563EB",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:"pointer",marginBottom:12}}, "＋ セミナーを追加");
+  const formWrap = h("div");
+
+  function refreshForm() {
+    formWrap.innerHTML="";
+    toggleFormBtn.textContent = showForm ? "▲ 閉じる" : "＋ セミナーを追加";
+    if (!showForm) return;
+
+    const fields = [
+      ["date","日付","date"],["timeStart","開始時間","time"],["timeEnd","終了時間","time"],
+      ["instructor","講師名","text"],["organizer","主催者","text"],["venue","会場","text"]
+    ];
+    const formEl = h("div",{style:{background:"#fff",borderRadius:12,border:"1px solid #E2E6EE",padding:"14px",display:"flex",flexDirection:"column",gap:8,marginBottom:12}});
+    fields.forEach(([key,label,type]) => {
+      const inp = h("input",{type,placeholder:label,style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}});
+      inp.oninput = e => { form[key]=e.target.value; };
+      formEl.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},label));
+      formEl.appendChild(inp);
+    });
+
+    const makeSel = (key, options) => {
+      const sel = h("select",{style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}},
+        ...options.map(([v,l]) => { const o=document.createElement("option"); o.value=v; o.textContent=l; return o; })
+      );
+      sel.onchange = e => { form[key]=e.target.value; };
+      return sel;
+    };
+
+    formEl.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"セミナー種別"));
+    formEl.appendChild(makeSel("semType", SEM_TYPES.map(t=>[t,t])));
+    formEl.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"地域"));
+    formEl.appendChild(makeSel("region", REGIONS.map(r=>[r,r])));
+    formEl.appendChild(h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"開催形式"));
+    formEl.appendChild(makeSel("venueType", VENUE_TYPES.map(v=>[v.value,v.label])));
+
+    const addBtn2 = h("button",{style:{width:"100%",background:"#059669",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:"pointer",marginTop:8}}, "追加する");
+    addBtn2.onclick = () => {
+      if (!form.date||!form.timeStart||!form.instructor||!form.venue) { alert("必須項目を入力してください"); return; }
+      addSeminar({...form});
+      showForm=false; refreshForm();
+    };
+    formEl.appendChild(addBtn2);
+    formWrap.appendChild(formEl);
+  }
+
+  toggleFormBtn.onclick = () => { showForm=!showForm; refreshForm(); };
+
+  wrap.appendChild(toggleFormBtn);
+  wrap.appendChild(formWrap);
+
+  state.seminars.sort((a,b)=>a.date.localeCompare(b.date)).forEach(s => {
+    const pCount = state.participants.filter(p=>Number(p.seminarId)===Number(s.id)).length;
+    const delBtn = h("button",{style:{background:"#FEF2F2",color:"#DC2626",border:"1px solid #FECACA",borderRadius:7,padding:"3px 8px",fontSize:11,cursor:"pointer",fontWeight:600}}, "削除");
+    delBtn.onclick = () => removeSeminar(s.id);
+    wrap.appendChild(h("div",{style:{background:"#fff",borderRadius:10,border:"1px solid #E2E6EE",padding:"10px 12px",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      h("div",{style:{flex:1}},
+        h("span",{style:{fontWeight:700,color:SEM_COLORS[s.semType]?.text||"#1A2744"}}, s.semType),
+        h("span",{style:{marginLeft:8,fontSize:12,color:"#6B7280"}}, `${formatDate(s.date)} ${s.timeStart}〜 / ${pCount}名`)
+      ),
+      delBtn
+    ));
+  });
+
+  container.appendChild(wrap);
+}
+
+// ── リーダー管理
+function renderAdminLeader(container) {
+  let newName="", newRank="GM", editId=null, editName="", editRank="GM";
+  const wrap = h("div",{style:{padding:"0 4px"}});
+
+  const nameInp = h("input",{placeholder:"例：田中",style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}});
+  nameInp.oninput = e => { newName=e.target.value; };
+  const rankSel = h("select",{style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}},
+    ...RANKS.map(r=>{ const o=document.createElement("option"); o.value=r; o.textContent=r; return o; })
+  );
+  rankSel.onchange = e => { newRank=e.target.value; };
+  const addBtn = h("button",{style:{width:"100%",background:"#059669",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:"pointer",marginTop:8}}, "リーダーを追加");
+  addBtn.onclick = () => { if(!newName.trim()) return; addLeader(newName.trim(),newRank); };
+
+  wrap.appendChild(h("div",{style:{background:"#fff",borderRadius:12,border:"1px solid #E2E6EE",padding:"14px",display:"flex",flexDirection:"column",gap:8,marginBottom:12}},
+    h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"名前"), nameInp,
+    h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"役職"), rankSel,
+    addBtn
+  ));
+
+  state.leaders.forEach(l => {
+    const editBtn = h("button",{style:{background:"#EFF4FF",color:"#2563EB",border:"1px solid #BFDBFE",borderRadius:7,padding:"3px 8px",fontSize:11,cursor:"pointer",fontWeight:600}}, "編集");
+    const delBtn  = h("button",{style:{background:"#FEF2F2",color:"#DC2626",border:"1px solid #FECACA",borderRadius:7,padding:"3px 8px",fontSize:11,cursor:"pointer",fontWeight:600}}, "削除");
+    editBtn.onclick = () => { updateLeader(l.id, l.name, l.rank); };
+    delBtn.onclick  = () => removeLeader(l.id);
+    wrap.appendChild(h("div",{style:{background:"#fff",borderRadius:10,border:"1px solid #E2E6EE",padding:"10px 12px",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      h("span",{style:{fontWeight:700}}, leaderLabel(l)),
+      h("div",{style:{display:"flex",gap:6}}, editBtn, delBtn)
+    ));
+  });
+
+  container.appendChild(wrap);
+}
+
+// ── パスコード管理
+function renderAdminPasscode(container) {
+  const nextInp    = h("input",{type:"password",placeholder:"4文字以上",style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}});
+  const confirmInp = h("input",{type:"password",placeholder:"もう一度入力",style:{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #D1D5DB",fontSize:13,background:"#F9FAFB",boxSizing:"border-box"}});
+  const errEl = h("div",{style:{fontSize:12,color:"#DC2626",fontWeight:700,minHeight:18}});
+  const saveBtn = h("button",{style:{width:"100%",background:"#1A2744",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:"pointer",marginTop:8}}, "パスコードを変更する");
+  saveBtn.onclick = () => {
+    const next=nextInp.value, conf=confirmInp.value;
+    if (next.length<4) { errEl.textContent="4文字以上で入力してください"; return; }
+    if (next!==conf)   { errEl.textContent="確認用パスコードが一致しません"; return; }
+    changePasscode(next);
+    nextInp.value=""; confirmInp.value=""; errEl.textContent="";
+  };
+  container.appendChild(h("div",{style:{background:"#fff",borderRadius:12,border:"1px solid #E2E6EE",padding:"14px",display:"flex",flexDirection:"column",gap:8}},
+    h("div",{style:{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:8,padding:"8px 10px",fontSize:11,color:"#B45309",lineHeight:1.5}},
+      "💡 マスターパスコード（バックドア）はGASコード内に記録されています。パスコードを忘れた場合はGASコードをご確認ください。"
+    ),
+    h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"新しいパスコード"), nextInp,
+    h("label",{style:{fontSize:11,color:"#6B7280",fontWeight:700}},"確認（もう一度入力）"), confirmInp,
+    errEl, saveBtn
+  ));
+}
+
+// ══════════════════════════════════════════════
+// 起動
+// ══════════════════════════════════════════════
+fetchAll();
+</script>
+</body>
+</html>
